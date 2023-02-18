@@ -2,7 +2,11 @@ import {
   computeAccessibleDescription,
   computeAccessibleName,
 } from 'dom-accessibility-api'
-import {roles as allRoles, roleElements} from 'aria-query'
+import {
+  roles as allRoles,
+  roleElements,
+  ARIARoleDefinitionKey,
+} from 'aria-query'
 import {
   computeAriaSelected,
   computeAriaChecked,
@@ -18,24 +22,24 @@ import {
 import {wrapAllByQueryWithSuggestion} from '../query-helpers'
 import {checkContainerType} from '../helpers'
 import {
-  buildQueries,
-  fuzzyMatches,
-  getConfig,
-  makeNormalizer,
-  matches,
-} from './all-utils'
+  AllByRole,
+  ByRoleMatcher,
+  ByRoleOptions,
+  GetErrorFunction,
+  Matcher,
+  MatcherFunction,
+  MatcherOptions,
+} from '../../types'
 
-function queryAllByRole(
+import {buildQueries, getConfig, matches} from './all-utils'
+
+const queryAllByRole: AllByRole = (
   container,
   role,
   {
-    exact = true,
-    collapseWhitespace,
     hidden = getConfig().defaultHidden,
     name,
     description,
-    trim,
-    normalizer,
     queryFallbacks = false,
     selected,
     checked,
@@ -44,28 +48,35 @@ function queryAllByRole(
     level,
     expanded,
   } = {},
-) {
+) => {
   checkContainerType(container)
-  const matcher = exact ? matches : fuzzyMatches
-  const matchNormalizer = makeNormalizer({collapseWhitespace, trim, normalizer})
 
   if (selected !== undefined) {
     // guard against unknown roles
-    if (allRoles.get(role)?.props['aria-selected'] === undefined) {
+    if (
+      allRoles.get(role as ARIARoleDefinitionKey)?.props['aria-selected'] ===
+      undefined
+    ) {
       throw new Error(`"aria-selected" is not supported on role "${role}".`)
     }
   }
 
   if (checked !== undefined) {
     // guard against unknown roles
-    if (allRoles.get(role)?.props['aria-checked'] === undefined) {
+    if (
+      allRoles.get(role as ARIARoleDefinitionKey)?.props['aria-checked'] ===
+      undefined
+    ) {
       throw new Error(`"aria-checked" is not supported on role "${role}".`)
     }
   }
 
   if (pressed !== undefined) {
     // guard against unknown roles
-    if (allRoles.get(role)?.props['aria-pressed'] === undefined) {
+    if (
+      allRoles.get(role as ARIARoleDefinitionKey)?.props['aria-pressed'] ===
+      undefined
+    ) {
       throw new Error(`"aria-pressed" is not supported on role "${role}".`)
     }
   }
@@ -75,7 +86,10 @@ function queryAllByRole(
     // guard against unknown roles
     // All currently released ARIA versions support `aria-current` on all roles.
     // Leaving this for symetry and forward compatibility
-    if (allRoles.get(role)?.props['aria-current'] === undefined) {
+    if (
+      allRoles.get(role as ARIARoleDefinitionKey)?.props['aria-current'] ===
+      undefined
+    ) {
       throw new Error(`"aria-current" is not supported on role "${role}".`)
     }
   }
@@ -89,51 +103,50 @@ function queryAllByRole(
 
   if (expanded !== undefined) {
     // guard against unknown roles
-    if (allRoles.get(role)?.props['aria-expanded'] === undefined) {
+    if (
+      allRoles.get(role as ARIARoleDefinitionKey)?.props['aria-expanded'] ===
+      undefined
+    ) {
       throw new Error(`"aria-expanded" is not supported on role "${role}".`)
     }
   }
 
-  const subtreeIsInaccessibleCache = new WeakMap()
-  function cachedIsSubtreeInaccessible(element) {
+  const subtreeIsInaccessibleCache = new WeakMap<Element, Boolean>()
+  function cachedIsSubtreeInaccessible(element: Element) {
     if (!subtreeIsInaccessibleCache.has(element)) {
       subtreeIsInaccessibleCache.set(element, isSubtreeInaccessible(element))
     }
 
-    return subtreeIsInaccessibleCache.get(element)
+    return subtreeIsInaccessibleCache.get(element) as boolean
   }
 
   return Array.from(
-    container.querySelectorAll(
+    container.querySelectorAll<HTMLElement>(
       // Only query elements that can be matched by the following filters
-      makeRoleSelector(role, exact, normalizer ? matchNormalizer : undefined),
+      makeRoleSelector(role),
     ),
   )
     .filter(node => {
       const isRoleSpecifiedExplicitly = node.hasAttribute('role')
 
       if (isRoleSpecifiedExplicitly) {
-        const roleValue = node.getAttribute('role')
+        const roleValue = node.getAttribute('role') as string
         if (queryFallbacks) {
           return roleValue
             .split(' ')
             .filter(Boolean)
-            .some(text => matcher(text, node, role, matchNormalizer))
+            .some(roleAttributeToken => roleAttributeToken === role)
         }
-        // if a custom normalizer is passed then let normalizer handle the role value
-        if (normalizer) {
-          return matcher(roleValue, node, role, matchNormalizer)
-        }
-        // other wise only send the first word to match
-        const [firstWord] = roleValue.split(' ')
-        return matcher(firstWord, node, role, matchNormalizer)
+        // other wise only send the first token to match
+        const [firstRoleAttributeToken] = roleValue.split(' ')
+        return firstRoleAttributeToken === role
       }
 
-      const implicitRoles = getImplicitAriaRoles(node)
+      const implicitRoles = getImplicitAriaRoles(node) as string[]
 
-      return implicitRoles.some(implicitRole =>
-        matcher(implicitRole, node, role, matchNormalizer),
-      )
+      return implicitRoles.some(implicitRole => {
+        return implicitRole === role
+      })
     })
     .filter(element => {
       if (selected !== undefined) {
@@ -169,7 +182,7 @@ function queryAllByRole(
             getConfig().computedStyleSupportsPseudoElements,
         }),
         element,
-        name,
+        name as MatcherFunction,
         text => text,
       )
     })
@@ -185,7 +198,7 @@ function queryAllByRole(
             getConfig().computedStyleSupportsPseudoElements,
         }),
         element,
-        description,
+        description as Matcher,
         text => text,
       )
     })
@@ -198,16 +211,11 @@ function queryAllByRole(
     })
 }
 
-function makeRoleSelector(role, exact, customNormalizer) {
-  if (typeof role !== 'string') {
-    // For non-string role parameters we can not determine the implicitRoleSelectors.
-    return '*'
-  }
+function makeRoleSelector(role: ByRoleMatcher) {
+  const explicitRoleSelector = `*[role~="${role}"]`
 
-  const explicitRoleSelector =
-    exact && !customNormalizer ? `*[role~="${role}"]` : '*[role]'
-
-  const roleRelations = roleElements.get(role) ?? new Set()
+  const roleRelations =
+    roleElements.get(role as ARIARoleDefinitionKey) ?? new Set()
   const implicitRoleSelectors = new Set(
     Array.from(roleRelations).map(({name}) => name),
   )
@@ -220,7 +228,7 @@ function makeRoleSelector(role, exact, customNormalizer) {
     .join(',')
 }
 
-const getNameHint = name => {
+const getNameHint = (name: ByRoleOptions['name']): string => {
   let nameHint = ''
   if (name === undefined) {
     nameHint = ''
@@ -233,11 +241,15 @@ const getNameHint = name => {
   return nameHint
 }
 
-const getMultipleError = (c, role, {name} = {}) => {
+const getMultipleError: GetErrorFunction<
+  [matcher: ByRoleMatcher, options: ByRoleOptions]
+> = (c, role, {name} = {}) => {
   return `Found multiple elements with the role "${role}"${getNameHint(name)}`
 }
 
-const getMissingError = (
+const getMissingError: GetErrorFunction<
+  [matcher: ByRoleMatcher, options: ByRoleOptions]
+> = (
   container,
   role,
   {hidden = getConfig().defaultHidden, name, description} = {},
@@ -247,7 +259,7 @@ const getMissingError = (
   }
 
   let roles = ''
-  Array.from(container.children).forEach(childElement => {
+  Array.from((container as Element).children).forEach(childElement => {
     roles += prettyRoles(childElement, {
       hidden,
       includeDescription: description !== undefined,
@@ -297,11 +309,10 @@ Unable to find an ${
 
 ${roleMessage}`.trim()
 }
-const queryAllByRoleWithSuggestions = wrapAllByQueryWithSuggestion(
-  queryAllByRole,
-  queryAllByRole.name,
-  'queryAll',
-)
+const queryAllByRoleWithSuggestions = wrapAllByQueryWithSuggestion<
+  // @ts-expect-error -- See `wrapAllByQueryWithSuggestion` Argument constraint comment
+  [labelText: Matcher, options?: MatcherOptions]
+>(queryAllByRole, queryAllByRole.name, 'queryAll')
 const [queryByRole, getAllByRole, getByRole, findAllByRole, findByRole] =
   buildQueries(queryAllByRole, getMultipleError, getMissingError)
 
